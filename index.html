@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Spectral 2D Turbulence</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%2312141a'/%3E%3Cpath d='M4 22c6-10 18 6 24-6' stroke='%233987e5' stroke-width='3' fill='none'/%3E%3Cpath d='M4 12c6-10 18 6 24-6' stroke='%23e66767' stroke-width='3' fill='none' opacity='.7'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main>
+      <div id="stage">
+        <canvas id="sim"></canvas>
+        <div id="status"></div>
+        <div id="stats"></div>
+      </div>
+      <aside id="sidebar">
+        <header>
+          <h1>Spectral 2D Turbulence</h1>
+          <p>Pseudo-spectral vorticity&ndash;streamfunction solver on a doubly periodic beta-plane. Drag to stir.</p>
+        </header>
+        <div class="row-label">presets</div>
+        <div id="presets"></div>
+        <div class="row-label">scenarios</div>
+        <div id="scenarios"></div>
+        <div class="plots">
+          <canvas id="spectrum"></canvas>
+          <canvas id="zonal"></canvas>
+        </div>
+        <div id="panel"></div>
+      </aside>
+    </main>
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>

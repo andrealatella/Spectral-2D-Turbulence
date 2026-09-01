@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Solver validation</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 28px;
+        background: #12141a;
+        color: #c3c2b7;
+        font: 13px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      h1 {
+        font-size: 15px;
+        color: #fff;
+        margin: 0 0 4px;
+      }
+      p.lede {
+        margin: 0 0 20px;
+        color: #7d8089;
+      }
+      table {
+        border-collapse: collapse;
+        min-width: 720px;
+      }
+      th {
+        text-align: left;
+        font-weight: 500;
+        color: #7d8089;
+        border-bottom: 1px solid rgba(195, 194, 183, 0.16);
+        padding: 6px 18px 6px 0;
+      }
+      td {
+        padding: 5px 18px 5px 0;
+        border-bottom: 1px solid rgba(195, 194, 183, 0.07);
+      }
+      .pass {
+        color: #199e70;
+      }
+      .fail {
+        color: #e66767;
+      }
+      #summary {
+        margin-top: 20px;
+        font-size: 14px;
+        color: #fff;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Solver validation</h1>
+    <p class="lede">
+      WGSL kernels checked against float64 fixtures from reference/spectral2d.py. Regenerate with
+      <code>python reference/make_fixtures.py</code>.
+    </p>
+    <table>
+      <thead>
+        <tr>
+          <th>check</th>
+          <th>relative error</th>
+          <th>tolerance</th>
+          <th>result</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div id="summary">running…</div>
+
+    <script type="module">
+      import { initDevice } from '../src/gpu/device.js';
+      import { Solver } from '../src/gpu/solver.js';
+
+      const rows = document.getElementById('rows');
+      const summary = document.getElementById('summary');
+      let failures = 0;
+
+      function report(name, err, tol) {
+        const ok = Number.isFinite(err) && err <= tol;
+        if (!ok) {
+          failures += 1;
+        }
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${name}</td><td>${err.toExponential(3)}</td><td>${tol.toExponential(1)}</td>` +
+          `<td class="${ok ? 'pass' : 'fail'}">${ok ? 'PASS' : 'FAIL'}</td>`;
+        rows.appendChild(tr);
+      }
+
+      function relError(got, want) {
+        let num = 0;
+        let den = 0;
+        for (let i = 0; i < want.length; i++) {
+          num = Math.max(num, Math.abs(got[i] - want[i]));
+          den = Math.max(den, Math.abs(want[i]));
+        }
+        return den > 0 ? num / den : num;
+      }
+
+      async function readBuffer(device, src, bytes) {
+        const dst = device.createBuffer({
+          size: bytes,
+          usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+        });
+        const enc = device.createCommandEncoder();
+        enc.copyBufferToBuffer(src, 0, dst, 0, bytes);
+        device.queue.submit([enc.finish()]);
+        await dst.mapAsync(GPUMapMode.READ);
+        const out = new Float32Array(dst.getMappedRange()).slice();
+        dst.unmap();
+        dst.destroy();
+        return out;
+      }
+
+      async function main() {
+        const fixtures = await (await fetch('./fixtures.json')).json();
+        const { device, description } = await initDevice();
+        document.querySelector('p.lede').textContent += `  Adapter: ${description}.`;
+
+        const n = fixtures.fft.n;
+        const solver = await Solver.create(device, { n, dyeScale: 1 });
+        const bytes = n * n * 8;
+        const cfg = {
+          beta: fixtures.step.beta,
+          drag: fixtures.step.mu,
+          viscosity: 1 / 1.5,
+          hyperP: fixtures.step.hyperP,
+          forceAmp: 0,
+          forceK: 20,
+          forceWidth: 2,
+          cfl: 0.5,
+          dtMin: 1e-6,
+          dtMax: 1,
+          dyeFade: 1,
+        };
+        solver.configure(cfg);
+        report(
+          'hyperviscosity coefficient matches reference',
+          Math.abs(solver.paramsF[2] / fixtures.step.nuH - 1),
+          1e-6,
+        );
+
+        const write = (buf, arr) =>
+          device.queue.writeBuffer(buf, 0, new Float32Array(arr));
+
+        write(solver.buf.packA, fixtures.fft.input);
+        let enc = device.createCommandEncoder();
+        let pass = enc.beginComputePass();
+        solver.fft.forward(pass, 'packA');
+        pass.end();
+        device.queue.submit([enc.finish()]);
+        report('fft2 forward', relError(await readBuffer(device, solver.buf.packA, bytes), fixtures.fft.forward), 2e-5);
+
+        write(solver.buf.packA, fixtures.fft.input);
+        enc = device.createCommandEncoder();
+        pass = enc.beginComputePass();
+        solver.fft.inverse(pass, 'packA');
+        pass.end();
+        device.queue.submit([enc.finish()]);
+        report('fft2 inverse', relError(await readBuffer(device, solver.buf.packA, bytes), fixtures.fft.inverse), 2e-5);
+
+        write(solver.buf.state[0], fixtures.velocity.what);
+        solver.phase = 0;
+        enc = device.createCommandEncoder();
+        pass = enc.beginComputePass();
+        pass.setPipeline(solver.p.velocityPack);
+        pass.setBindGroup(0, solver.bg.velocityPack[0]);
+        pass.dispatchWorkgroups(Math.ceil((n * n) / 64));
+        pass.end();
+        device.queue.submit([enc.finish()]);
+        report('velocity packing (omega + i u)', relError(await readBuffer(device, solver.buf.packA, bytes), fixtures.velocity.packA), 2e-5);
+        report('velocity packing (v)', relError(await readBuffer(device, solver.buf.packB, bytes), fixtures.velocity.packB), 2e-5);
+
+        write(solver.buf.physZ, fixtures.assemble.z);
+        write(solver.buf.force, new Array(2 * n * n).fill(0));
+        enc = device.createCommandEncoder();
+        pass = enc.beginComputePass();
+        pass.setPipeline(solver.p.assemble);
+        pass.setBindGroup(0, solver.bg.assemble);
+        pass.dispatchWorkgroups(Math.ceil((n * n) / 64));
+        pass.end();
+        device.queue.submit([enc.finish()]);
+        report('nonlinear assembly with dealiasing', relError(await readBuffer(device, solver.buf.rhs, bytes), fixtures.assemble.rhs), 5e-5);
+
+        const runSteps = async (count, source) => {
+          solver.phase = 0;
+          solver.dyeParity = 0;
+          write(solver.buf.state[0], source);
+          device.queue.writeBuffer(solver.buf.dt, 0, new Float32Array([fixtures.step.dt, 0, 0, 0]));
+          solver.setSplats([]);
+          const e = device.createCommandEncoder();
+          const p = e.beginComputePass();
+          for (let i = 0; i < count; i++) {
+            solver.encodeStep(p);
+          }
+          p.end();
+          device.queue.submit([e.finish()]);
+          return readBuffer(device, solver.buf.state[solver.phase], bytes);
+        };
+
+        report('one integrating-factor RK3 step', relError(await runSteps(1, fixtures.step.before), fixtures.step.after), 5e-5);
+        report('twenty steps accumulated', relError(await runSteps(20, fixtures.step.before), fixtures.run20.after), 5e-3);
+
+        summary.textContent = failures === 0 ? `ALL ${rows.children.length} CHECKS PASS` : `${failures} CHECK(S) FAILED`;
+        summary.className = failures === 0 ? 'pass' : 'fail';
+        summary.style.color = failures === 0 ? '#199e70' : '#e66767';
+        document.title = failures === 0 ? 'PASS' : 'FAIL';
+      }
+
+      main().catch((err) => {
+        summary.textContent = `ERROR: ${err.message}`;
+        summary.style.color = '#e66767';
+        document.title = 'ERROR';
+        console.error(err);
+      });
+    </script>
+  </body>
+</html>
